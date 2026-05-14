@@ -1,0 +1,68 @@
+[package]
+name = "livepaper"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "livepaper"
+path = "src/main.rs"
+
+[dependencies]
+# ── Web ─────────────────────────────────────────────────────────────────────
+axum            = { version = "=0.7.4", features = ["macros"] }
+tower           = { version = "=0.4.13", features = ["full"] }
+tower-http      = { version = "=0.5.2",  features = ["cors", "trace", "timeout"] }
+tokio           = { version = "=1.35.1", features = ["full"] }
+hyper           = { version = "=1.1.0",  features = ["full"] }
+
+# ── Serialization ────────────────────────────────────────────────────────────
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Database ─────────────────────────────────────────────────────────────────
+sqlx = { version = "=0.6.3", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "offline"] }
+neo4rs = "=0.6.2"
+
+# ── HTTP client ──────────────────────────────────────────────────────────────
+# reqwest 0.11: avoid 0.12 which pulls getrandom 0.4 → wasip3 → wit-bindgen(edition2024)
+reqwest = { version = "=0.11.23", default-features = false, features = ["json", "rustls-tls"] }
+
+# ── UUID / Time ──────────────────────────────────────────────────────────────
+uuid        = { version = "=1.6.1",  features = ["v4", "serde"] }
+chrono      = { version = "=0.4.31", features = ["serde"] }
+time        = "=0.3.35"   # 0.3.31 bug fixed in 0.3.35; 0.3.36+ needs time-macros 0.2.27 (edition2024)
+
+# ── Errors / Logging ─────────────────────────────────────────────────────────
+anyhow           = "1"
+thiserror        = "1"
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+dotenvy    = "0.15"
+async-trait = "0.1"
+futures     = "0.3"
+futures-util = "0.3"
+once_cell   = "1"
+base64      = "=0.21.5"
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+jsonwebtoken = "=9.2.0"
+
+# ── Email (rustls only — avoids native-tls → security-framework 3.7 → edition2024) ─
+lettre = { version = "=0.10.4", default-features = false, features = ["builder", "tokio1-rustls-tls", "smtp-transport"] }
+
+# ── PDF ──────────────────────────────────────────────────────────────────────
+pdf-extract = "=0.7.0"
+
+# ── Pinned transitives to prevent edition2024 resolution ─────────────────────
+tempfile     = "=3.8.1"   # pin: newer versions pull getrandom 0.4
+indexmap     = "=2.2.6"   # pin: 2.14 pulls hashbrown 0.17
+url  = "=2.4.1"   # pin: 2.5+ pulls idna 1.x → idna_adapter(edition2024)
+idna = "=0.3.0"   # pin: 1.x pulls idna_adapter(edition2024)
+getrandom = "=0.2.15"  # 0.3+ pulls wasip2 → wit-bindgen(edition2024)
+hashbrown = "=0.12.3"  # 0.14 needs ahash 0.8.7+ which pulls getrandom 0.3+
+crc = "=3.0.1"
+unicode-segmentation = "=1.11.0"
+tokio-stream = "=0.1.14"
+time-macros = "=0.2.18"   # companion to time 0.3.35, avoids edition2024

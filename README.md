@@ -1,448 +1,321 @@
-**Andela AI Engineering Bootcamp — Capstone 2025**
+# LivePaper
 
-### Problem
-We all read research papers, first we read the topic, then we read abstract, we hope it answers the questions we have, so we invest good time trying to understand the paper, in the end we leave with even more questions. 
+> Turn static research papers into a self-improving, conversational knowledge base.
 
-Even worse, while paper abstracts are public, full papers are hidden behind paywalls, this means we invest money and time only to leave with more questions.
-
-### Solution
-Introducing LivePaper, LivePaper turns static research papers into live documents.  With LivePaper, a researcher simply asks questions, LivePaper returns a few papers answering the question, with a few focus papers, the researcher can continue to chat with the focused papers. Where a question is not directly/clearly answered by the paper, LivePaper passes the question to the author(s) or expert(s) in realtime. Response from the authors/experts is then be added to the knowledge base to improve the quality of subsequent results
-
-### How it works in practice
-Three core systems:
-Ingestion: this involves 2 key steps
-Reading the paper
-Enriching the paper: using a model to extract key features of the paper: 
-Concept 
-Method
-findings
-
-Storage: 
-2 key storage types and one backup/evaluation storage
-Raw papers details in a typical database (Postgres)
-Storing enrichment data in graph database (Neo4J)
-Vector Db (S3 Vector)
-
-
-Retrieval
-Understand the query
-Intent Extraction: classify the query into an intent, this intent is later passed to the model that ranks search result, allowing it to prioritize the right paper
-Query Expansion: generate synonyms of the query, basically, you are using a model to generate multiple ways the query could have been written
-Multi Retrieval
-Get matches from the Vector DB (RAG)
-Keyword query: get exact keyword matches
-Get relational matches from the graph
-Rank Result
-Here we use a model to rank the result from the 
-
-
-
-### Live deployment
-
-| Endpoint | URL |
-|---|---|
-| Frontend | [https://d69yz55ie5or9.cloudfront.net](https://d69yz55ie5or9.cloudfront.net) (CloudFront → S3 static export) |
-| Backend API | [https://whiuf23y2t.us-east-1.awsapprunner.com](https://whiuf23y2t.us-east-1.awsapprunner.com) (App Runner) |
-| Health check | `GET /api/health` → `{"status":"ok","service":"livepaper-api","graph_nodes":0}` |
+LivePaper is an **Agentic GraphRAG** system that lets researchers ask questions across ingested academic papers, grounded in real content with citations. When the knowledge base can't answer a question, it automatically contacts the paper's authors or registered experts by email. Every expert reply is embedded back into the knowledge base — so the next researcher asking the same question gets the answer instantly.
 
 ---
 
+## The Problem
 
-## Architecture
+1. **The answer gap** — papers rarely answer the specific question you have. You read an entire paper only to leave with more questions.
+2. **The paywall tax** — you invest money and time accessing a paper, only to find it doesn't cover what you needed.
+3. **The expert access problem** — the person who could answer your question in 30 seconds wrote the paper you're reading, but there's no practical way to reach them at scale.
 
-```
-                      ┌─────────────────────────────────┐
-                      │         Next.js Frontend         │
-                      │  Landing · Search · Trace Panel  │
-                      └────────────────┬────────────────┘
-                                       │ REST
-                      ┌────────────────▼────────────────┐
-                      │        FastAPI Backend           │
-                      │  /ingest  /ask  /expert-response │
-                      └──┬──────────┬──────────┬────────┘
-                         │          │          │
-              ┌──────────▼──┐  ┌────▼────┐  ┌─▼──────────────┐
-              │  Ingestion  │  │Retrieval│  │  Expert Router  │
-              │    Agent    │  │  Agent  │  │     Agent       │
-              └──────┬──────┘  └────┬────┘  └────────┬───────┘
-                     │              │                 │
-        ┌────────────▼──────────────▼─────────────────▼──────┐
-        │                    Storage Layer                     │
-        │  Aurora Serverless v2  ·  Neo4J  ·  S3 Vectors      │
-        └─────────────────────────────────────────────────────┘
-```
-
-### Five Agents
-
-| Agent | Role |
-|---|---|
-| **Ingestion** | Downloads PDF, extracts title/authors/concepts/findings via LLM, writes embeddings to S3 Vectors and concept nodes to Neo4J |
-| **Retrieval** | Embeds the question, runs cosine search, returns ranked `CitedPassage` list with confidence scores |
-| **Gap Detector** | Decides if top confidence < threshold → escalate to expert |
-| **Expert Router** | Generates a structured `EscalationCard` with candidate authors identified from paper metadata |
-| **Response Ingestion** | Parses expert reply, embeds it, writes `ExpertResponse` node to Neo4J — future queries answer instantly |
-
-### Storage Tiers
-
-| Store | What lives here |
-|---|---|
-| **Aurora Serverless v2** | Papers, jobs, experts, expert responses, chat history, escalation audit trail. All `/api/papers` and `/api/experts` routes read and write through `app/services/database.py`; the container runs `alembic upgrade head` on every boot before uvicorn starts so schema changes ship with the image. |
-| **Neo4J** | (optional) Knowledge graph — Paper → Concept, Paper → ExpertResponse relationships. App falls back to a no-op when `NEO4J_URI` is empty. |
-| **S3 Vectors** | 384-dim `all-MiniLM-L6-v2` embeddings, mean-pooled from token outputs. Bucket `livepaper-vectors`, index `papers`. |
-
-### LLM and Embeddings
-
-| Component | Implementation |
-|---|---|
-| **LLM** (extraction, retrieval reasoning, expert routing) | **Amazon Nova Pro** via Bedrock, called through `LiteLLM` with the cross-region inference profile `us.amazon.nova-pro-v1:0`. The App Runner task role is granted `bedrock:InvokeModel` on the profile ARN in `us-east-1 / us-east-2 / us-west-2` plus the underlying foundation-model ARN in each. |
-| **Embeddings** | `all-MiniLM-L6-v2` on a SageMaker Serverless endpoint. The `livepaper-embedding-endpoint` resource is left as a Terraform stub (deploying it requires `iam:PassRole` on the operator); production currently calls the existing `alex-embedding-endpoint` in the same account, mean-pooling the token-level Hugging Face output into a single 384-dim sentence vector. |
+Standard AI chatbots don't solve this — they hallucinate, lack domain depth, and have no connection to actual authors or the living state of a research field.
 
 ---
 
-## Running Locally
+## How It Works
 
-No AWS credentials needed — every service has a dev fallback.
-
-### Backend
-
-```bash
-cd backend
-pip install ".[dev]"
-
-# Copy and edit env (all AWS vars can stay empty for dev)
-cp ../.env.example .env
-# Optional expert / Mailjet vars — see `backend/.env.example.expert`, merge into `.env` if needed
-
-pytest          # unit + integration suites, all green
-uvicorn app.main:app --reload --port 8000
 ```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-cp .env.local.example .env.local   # set NEXT_PUBLIC_API_URL=http://localhost:8000
-npm run dev     # → http://localhost:3000
+User Question
+     │
+     ▼
+Retrieval Agent ──► Pinecone (vector search)
+     │                    │
+     │              Neo4j (graph enrichment)
+     │                    │
+     ▼                    ▼
+Gap Detector Agent ◄── RetrievalResult
+     │
+     ├── Sufficient ──► LLM Answer Generation
+     │
+     └── Gap detected
+              │
+              ▼
+       Expert Router Agent
+              │
+              ├── Query Neo4j for experts/authors by concept
+              │
+              └── SendEmailTool ──► SendGrid ──► Expert inbox
+                                                      │
+                                               Expert Response
+                                                      │
+                                                      ▼
+                                         Response Ingestion Agent
+                                                      │
+                                            ┌─────────┴──────────┐
+                                            ▼                     ▼
+                                         Pinecone              Neo4j
+                                      (new vector)       (ExpertResponse node)
 ```
-
-### Dev Fallbacks
-
-`OPENAI_API_KEY` is the only secret hard-required when `DEBUG=false` (see `app/core/config.py`). Everything else degrades gracefully:
-
-| Env var empty | What happens |
-|---|---|
-| `AURORA_CLUSTER_ARN` / `AURORA_HOST` | SQLite (`aiosqlite`) in-memory database |
-| `VECTOR_BUCKET` | Cosine search over an in-memory dict |
-| `SAGEMAKER_ENDPOINT` | Local `sentence-transformers` if installed, otherwise a zero vector (which S3 Vectors will reject — only safe in tests with `VECTOR_BUCKET=""`) |
-| `NEO4J_URI` | No-op logger (graph writes silently skipped) |
-| `LANGFUSE_PUBLIC_KEY` | Tracing disabled, app runs normally |
-| `BEDROCK_MODEL_ID` | LiteLLM falls back to `gpt-4o-mini` (requires `OPENAI_API_KEY`) |
-| `CORS_ORIGINS` | Defaults to `http://localhost:3000` only |
-
----
-
-## Deployment
-
-### Infrastructure (Terraform)
-
-State lives in S3 (`s3://livepaper-terraform-state-...`). All commands run from `infra/`:
-
-```bash
-cd infra
-terraform init -reconfigure
-terraform apply \
-  -var="openai_api_key=$OPENAI_API_KEY" \
-  -var="langfuse_public_key=$LANGFUSE_PUBLIC_KEY" \
-  -var="langfuse_secret_key=$LANGFUSE_SECRET_KEY"
-```
-
-Secrets are written to AWS Secrets Manager once at create time and then ignored on subsequent applies (`lifecycle { ignore_changes = [secret_string] }`), so omitting `-var` flags on later runs **will not blank out** existing secrets — rotate them out-of-band with `aws secretsmanager put-secret-value`.
-
-Provisions:
-- VPC data sources (default VPC) + Aurora Serverless v2 cluster (publicly accessible, ingress restricted to App Runner's published egress IP ranges + the App Runner SG)
-- ECR repository, App Runner service (DEFAULT egress, HTTP `/api/health` health check), task and access IAM roles
-- S3 bucket + CloudFront distribution for the frontend (Origin Access Control)
-- S3 bucket for raw PDF storage; S3 Vectors policy granting the task role read/write to `livepaper-vectors`
-- SQS queues (`ingestion`, `escalation`) with DLQs
-- Secrets Manager entries for OpenAI / LangFuse / Neo4J
-- Bedrock IAM policy covering both the inference profile and the underlying foundation-model ARNs in `us-east-1 / us-east-2 / us-west-2`
-- SageMaker IAM policy granting `InvokeEndpoint` on `livepaper-embedding-endpoint` *and* `alex-embedding-endpoint` (the latter is what's actually wired in production)
-- IAM user + access key for the GitHub Actions CI pipeline (ECR push + S3 deploy + CloudFront invalidation)
-
-The S3 Vectors bucket and its `papers` index are created out-of-band via `aws s3vectors create-vector-bucket` / `create-index` because the AWS Terraform provider does not yet expose those resources.
-
-Outputs after apply:
-
-```bash
-terraform output frontend_url            # https://d69yz55ie5or9.cloudfront.net
-terraform output backend_url             # https://whiuf23y2t.us-east-1.awsapprunner.com
-terraform output ecr_repository_url      # 375510692572.dkr.ecr.us-east-1.amazonaws.com/livepaper-backend
-terraform output frontend_bucket         # livepaper-frontend-375510692572
-terraform output cloudfront_distribution_id
-```
-
-### Backend image
-
-```bash
-aws ecr get-login-password --region us-east-1 | \
-  docker login --username AWS --password-stdin 375510692572.dkr.ecr.us-east-1.amazonaws.com
-
-cd backend
-docker build --platform linux/amd64 \
-  -t 375510692572.dkr.ecr.us-east-1.amazonaws.com/livepaper-backend:latest .
-docker push 375510692572.dkr.ecr.us-east-1.amazonaws.com/livepaper-backend:latest
-```
-
-App Runner has `auto_deployments_enabled = true`, so a push to `:latest` triggers a rolling deploy. Watch with:
-
-```bash
-aws apprunner list-services --region us-east-1 \
-  --query 'ServiceSummaryList[?ServiceName==`livepaper-backend`].Status' --output text
-```
-
-### Frontend
-
-```bash
-cd frontend
-cat > .env.local <<EOF
-NEXT_PUBLIC_API_URL=$(cd ../infra && terraform output -raw backend_url)
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=...
-CLERK_SECRET_KEY=...
-EOF
-
-npm ci
-npm run build                                                           # produces frontend/out/
-aws s3 sync out s3://$(cd ../infra && terraform output -raw frontend_bucket) --delete
-aws cloudfront create-invalidation \
-  --distribution-id $(cd ../infra && terraform output -raw cloudfront_distribution_id) \
-  --paths "/*"
-```
-
-### CI/CD
-
-`.github/workflows/deploy.yml` is wired up to do all of the above on push to `main`:
-
-1. Backend `pytest` (uses the dev fallbacks — `VECTOR_BUCKET=""`, `NEO4J_URI=""`, `SAGEMAKER_ENDPOINT=""`)
-2. Frontend `npm run type-check`
-3. Docker build → push to ECR with both `:latest` and `:git-<sha>` tags (App Runner auto-deploys)
-4. `npm run build` → `s3 sync` → CloudFront invalidation
-5. `/api/health` smoke test (10 retries × 15s)
-
-Required GitHub repo secrets:
-
-| Secret | Value |
-|---|---|
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `terraform output ci_access_key_id` / `ci_secret_access_key` (the IAM user Terraform provisioned) |
-| `NEXT_PUBLIC_API_URL` | `terraform output backend_url` (also used by the post-deploy health-check step) |
-| `FRONTEND_BUCKET` | `terraform output frontend_bucket` |
-| `CLOUDFRONT_DISTRIBUTION_ID` | `terraform output cloudfront_distribution_id` |
-| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` / `CLERK_SECRET_KEY` | Clerk dashboard |
-
-> **Status:** the workflow file is committed but the current production deploy was run manually with the commands above (CI secrets not yet wired). Wiring them is a one-time setup.
-
----
-
-## API Reference
-
-All endpoints are served at `http://localhost:8000` in dev, and at `https://whiuf23y2t.us-east-1.awsapprunner.com` in production.
-Set `NEXT_PUBLIC_API_URL` in the frontend `.env.local` to point to the right backend.
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/papers/ingest` | Ingest a paper — accepts `pdf_url` (form), file upload, or `title` + `abstract` |
-| `GET` | `/api/papers/jobs/{job_id}` | Poll ingestion job status — `pending / running / completed / failed` |
-| `GET` | `/api/papers` | List all papers |
-| `GET` | `/api/papers/{id}` | Get a single paper |
-| `PUT` | `/api/papers/{id}` | Update a paper |
-| `DELETE` | `/api/papers/{id}` | Delete a paper |
-| `POST` | `/api/papers/{id}/invite-expert` | Mint an `/expert-response` invite link — `{ expert_email, expert_name?, affiliation? }` → `{ invite_url, expert_id, ... }`. Email sending is intentionally not automated; the admin pastes the returned URL into their email tool. |
-| `POST` | `/api/search/ask` | Ask a question — returns cited passages and escalation card if gap detected |
-| `POST` | `/chat` | Multi-turn chat with session history — `{ message, session_id? }` |
-| `GET` | `/api/experts` | List all experts (populated by both flows below) |
-| `GET` | `/api/experts/{id}` | Get a single expert with the papers they've responded to |
-| `POST` | `/api/expert-responses` | Submit a paper-level expert review — `{ paper_id, expert_email, response, expert_name? }`. Embeds the response, writes it to S3 Vectors + Neo4j, and persists to Aurora. |
-| `POST` | `/api/escalation/respond` | (Legacy escalation flow) Submit an expert response to a specific question |
-| `GET` | `/api/health` | Health check — returns `{ status, graph_nodes }` |
-
-Interactive docs available at `/docs` in debug mode.
-
-### Expert review workflow
-
-There are two paths an expert response can arrive through, and they share
-the same embed → S3 Vectors → Neo4j → Aurora pipeline (the
-`response_ingestion` agent):
-
-1. **Question-driven escalation** — Retrieval Agent flags a gap, Expert
-   Router emits an `EscalationCard`, the expert is asked the specific
-   question, response goes to `POST /api/escalation/respond`.
-2. **Paper-level review (admin invite)** — Admin clicks **Invite** on a
-   paper card in the dashboard, gets back an invite link from
-   `POST /api/papers/{id}/invite-expert`, sends it to the expert. The
-   expert opens the link, fills the form on `/expert-response`, and
-   submits to `POST /api/expert-responses`.
-
-Both flows upsert the expert by email into Aurora (`is_registered=true`
-once they actually respond), so the Experts page always reflects who has
-contributed.
-
----
-
-## Production Runtime
-
-### App Runner environment
-
-The container CMD is `alembic upgrade head && exec uvicorn app.main:app --workers 2` — alembic runs first so schema migrations always land before traffic, and two workers are safe now that all routes persist to Aurora rather than per-process dicts. Notable env vars set by Terraform:
-
-| Variable | Value | Purpose |
-|---|---|---|
-| `DEBUG` | `false` | Enables prod validators in `app/core/config.py` |
-| `CORS_ORIGINS` | `https://<cloudfront-domain>,http://localhost:3000` | Allow the deployed frontend (and dev) to call the API |
-| `FRONTEND_URL` | `https://<cloudfront-domain>` | Used by `POST /api/papers/{id}/invite-expert` to build invite links pointing at the deployed frontend |
-| `BEDROCK_MODEL_ID` | `us.amazon.nova-pro-v1:0` | Cross-region inference profile used by LiteLLM |
-| `BEDROCK_REGION` | `us-west-2` | LiteLLM region hint (the inference profile may route elsewhere) |
-| `SAGEMAKER_ENDPOINT` | `alex-embedding-endpoint` | Embedding endpoint (see Architecture → LLM and Embeddings) |
-| `VECTOR_BUCKET` | `livepaper-vectors` | S3 Vectors bucket name |
-| `VECTOR_INDEX` | `papers` | Required by `s3vectors:PutVectors` / `QueryVectors` |
-| `AURORA_CLUSTER_ARN` / `AURORA_HOST` / `AURORA_PORT` / `AURORA_DATABASE` / `AURORA_USERNAME` | from Aurora outputs | DB connection |
-| `AURORA_PASSWORD` | injected from Secrets Manager | Aurora's managed master-user password is JSON-encoded; `app/services/database.py:_resolve_password()` parses it before handing to asyncpg (and `alembic/env.py` mirrors that logic) |
-| `OPENAI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD` | Secrets Manager | Application secrets |
-
-### Networking
-
-- App Runner uses `egress_type = "DEFAULT"` (public egress over the App Runner service network) so it can reach OpenAI / Bedrock / LangFuse without a NAT gateway.
-- Aurora is `publicly_accessible = true` but its security group only ingresses on 5432/tcp from (a) the App Runner SG and (b) App Runner's currently published egress CIDR ranges (fetched dynamically via `data "aws_ip_ranges" "apprunner"`).
-- TLS terminates at CloudFront (frontend) and the App Runner service URL (backend).
-
-### Health check
-
-App Runner's HTTP health check hits `/api/health` every 10 seconds. The endpoint also reports `graph_nodes` (Neo4J node count) so degradation in the optional graph store surfaces in the response.
-
----
-
-## Observability
-
-All five agents are instrumented with LangFuse. Every request produces:
-- A root trace with agent name, input, and output
-- Child spans per pipeline step (embed → search → rank → threshold)
-- Confidence scores recorded as LangFuse metrics
-- Trace IDs returned in API responses and displayed in the UI trace panel
-
-View live traces → [cloud.langfuse.com](https://cloud.langfuse.com)
-
----
-
-## Team
-
-| Name | Role |
-|---|---|
-| **Stella** | Infrastructure — Terraform, Aurora schema, SQS, SageMaker, LangFuse tracing, CI/CD |
-| **Niskan** | Agents — Ingestion Agent (PDF → LLM extraction → Neo4J + S3 Vectors) |
-| **Adetayo** | Backend — Gap Detector, Expert Router, Response Ingestion Agent |
-| **Seun** | Frontend — Search UI, cited passage display, LangFuse trace panel |
 
 ---
 
 ## Tech Stack
 
-**AI:** OpenAI Agents SDK · LiteLLM → Amazon Nova Pro (Bedrock) · all-MiniLM-L6-v2 (SageMaker)
+| Layer | Technologies |
+|---|---|
+| **Backend** | Rust, Axum, Tokio, Tower, SQLx |
+| **Databases** | PostgreSQL, Neo4j AuraDB, Pinecone |
+| **AI / ML** | OpenRouter, GPT-4o-mini, text-embedding-3-small, LangFuse |
+| **Architecture** | Agentic AI, GraphRAG, multi-hop graph reasoning, RAG pipeline |
+| **Frontend** | Next.js, React, TypeScript, Tailwind CSS, react-markdown |
+| **Auth** | Clerk, JWT, JWKS |
+| **Email** | SendGrid |
+| **Deployment** | Railway (backend), Vercel (frontend) |
 
-**Backend:** FastAPI · SQLAlchemy async · Alembic · Neo4J · LangFuse
+---
 
-**Frontend:** Next.js 15 · Tailwind CSS · TypeScript
-
-**Infrastructure:** AWS App Runner · Aurora Serverless v2 · S3 Vectors · SageMaker Serverless · SQS · ECR · Terraform
-
-## Building docker image for the backend
-cd into the backend directory
-
-- Step 1 — Authenticate:
-```
-aws ecr get-login-password --region us-east-1 | \
-  docker login --username AWS --password-stdin \
-  123456789012.dkr.ecr.us-east-1.amazonaws.com
-```
-
-- Step 2 — Build and push (single command)
+## Project Structure
 
 ```
-`docker buildx build \
-  --platform linux/amd64 \
-  --network host \
-  -t 123456789012.dkr.ecr.us-east-1.amazonaws.com/livepaper-backend:latest \
-  --push \
-  .`
+live_paper_rust/
+├── backend/                  # Rust/Axum API
+│   ├── src/
+│   │   ├── main.rs           # Server bootstrap, router wiring
+│   │   ├── models/           # Domain types
+│   │   ├── db/
+│   │   │   ├── postgres.rs   # PostgreSQL CRUD + migrations
+│   │   │   ├── neo4j.rs      # GraphRAG nodes + relationships
+│   │   │   └── pinecone.rs   # Vector upsert + semantic query
+│   │   ├── services/
+│   │   │   ├── llm.rs        # OpenRouter chat + JSON extraction
+│   │   │   ├── embedding.rs  # Text → vector embeddings
+│   │   │   ├── email.rs      # SendGrid email delivery
+│   │   │   ├── langfuse.rs   # Observability traces + spans
+│   │   │   └── pdf.rs        # PDF download + chunking
+│   │   ├── agents/
+│   │   │   ├── ingestion.rs          # PDF → Neo4j + Pinecone
+│   │   │   ├── retrieval.rs          # Query → embed → search → graph
+│   │   │   ├── gap_detector.rs       # Confidence check + LLM verification
+│   │   │   ├── expert_router.rs      # Neo4j lookup → email experts
+│   │   │   ├── chat.rs               # Full pipeline orchestration
+│   │   │   └── response_ingestion.rs # Expert reply → knowledge base
+│   │   ├── handlers/
+│   │   │   ├── chat.rs       # POST /chat
+│   │   │   ├── papers.rs     # CRUD /papers
+│   │   │   └── experts.rs    # /experts endpoints
+│   │   ├── middleware/
+│   │   │   └── auth.rs       # Clerk JWT verification
+│   │   └── utils/
+│   │       ├── config.rs     # Environment config
+│   │       └── errors.rs     # AppError → HTTP response
+│   ├── Cargo.toml
+│   ├── .env.example
+│   └── Dockerfile
+│
+└── frontend/                 # Next.js app
+    ├── components/
+    │   └── ResearchChat.tsx  # Chat UI with markdown rendering
+    ├── pages/
+    │   ├── index.tsx         # Landing page
+    │   ├── chat.tsx          # Chat interface
+    │   ├── dashboard.tsx     # Admin paper management
+    │   ├── experts.tsx       # Admin experts view
+    │   └── expert-response.tsx # Public expert submission page
+    ├── lib/
+    │   └── api.ts            # Authenticated API client (Clerk JWT)
+    └── hooks/
+        └── useBackendSync.ts # User sync on sign-in
 ```
 
-- Step 3 — Verify the image is there
+---
 
+## API Reference
+
+### Public Endpoints (no auth required)
 ```
-aws ecr describe-images \
-  --repository-name livepaper-backend \
-  --region us-east-1 \
-  --query 'imageDetails[*].{Tag:imageTags[0],Size:imageSizeInBytes,Pushed:imagePushedAt}' \
-  --output table
-```
-
-- Step 3 — Verify the image is there
-Return to infra directory
-run `terraform apply`
-
-## Build and deploy the frontend
-cd into the frontend folder
-`npm run build`
-
- Upload the export to S3
-```
-aws s3 sync out/ s3://livepaper-frontend-123456789012 \
-  --delete \
-  --cache-control "public, max-age=3600"
+GET  /papers         — list all papers with authors
+GET  /papers/:id     — get a single paper with authors
+POST /experts/response — submit an expert response
 ```
 
-# Invalidate CloudFront cache
+### Protected Endpoints (Clerk JWT required)
 ```
-aws cloudfront create-invalidation \
-  --distribution-id YOUR_DISTRIBUTION_ID \
-  --paths "/*"
+POST   /chat             — send a message, runs full agent pipeline
+POST   /papers           — add a paper (triggers background ingestion)
+PUT    /papers/:id       — update paper metadata
+DELETE /papers/:id       — delete paper + remove vectors
+GET    /experts          — list all experts with associated papers
+POST   /experts          — invite an expert to a paper
 ```
 
+---
 
-## Setup steps
-1. Make sure you have these installed:
+## Running Locally
 
-AWS CLI (aws --version)
-Terraform (terraform --version)
-2. Configure your AWS credentials locally:
+### Prerequisites
 
+- [Rust](https://rustup.rs/) (stable, 1.75+)
+- [Node.js](https://nodejs.org/) (18+)
+- [PostgreSQL](https://www.postgresql.org/) running locally or a connection string
+- [Neo4j AuraDB](https://neo4j.com/cloud/aura/) free instance (or local Neo4j)
+- [Pinecone](https://www.pinecone.io/) account with an index created (1024 or 1536 dims)
+- [Clerk](https://clerk.com/) app for authentication
+- [OpenRouter](https://openrouter.ai/) API key
+- [SendGrid](https://sendgrid.com/) API key with a verified sender
 
-aws configure
-Enter your AWS Access Key ID, Secret Access Key, and set region to us-east-1.
+---
 
-3. Clone/pull the live-paper repo and go to the infra folder:
+### 1. Clone the repository
 
+```bash
+git clone https://github.com/yourname/live_paper_rust.git
+cd live_paper_rust
+```
 
-cd live-paper/infra
-4. Create the Terraform state bucket in your account first:
+---
 
+### 2. Backend setup
 
-aws s3 mb s3://livepaper-tf-state --region us-east-1
-aws s3api put-bucket-versioning --bucket livepaper-tf-state --versioning-configuration Status=Enabled
-5. Run Terraform:
+```bash
+cd backend
+cp .env.example .env
+```
 
+Fill in your `.env`:
 
-terraform init
-terraform apply
-Type yes when prompted. Takes about 10–15 minutes.
+```dotenv
+# Server
+PORT=8080
 
-6. After it finishes, run:
+# PostgreSQL
+DATABASE_URL=postgres://user:password@localhost:5432/livepaper
 
+# Neo4j
+NEO4J_URI=neo4j+s://xxxxxxxx.databases.neo4j.io
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your_aura_password
+NEO4J_DB=                          # leave blank for AuraDB (uses server default)
 
-terraform output
-Share the outputs with me — specifically backend_url, frontend_url, ci_access_key_id, and ci_secret_access_key.
+# Pinecone
+PINECONE_API_KEY=your_pinecone_key
+PINECONE_HOST=https://your-index-host.pinecone.io
+PINECONE_INDEX=livepaper
+PINECONE_NAMESPACE=papers
+PINECONE_DIMENSIONS=1024           # must match your index dimension
 
-7. Also create the S3 Vectors bucket manually (Terraform can't do this yet):
+# OpenRouter
+OPENROUTER_API_KEY=your_openrouter_key
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=openai/gpt-4o-mini
+EMBEDDING_MODEL=openai/text-embedding-3-small
 
+# Clerk
+CLERK_JWKS_URL=https://your-clerk-domain.clerk.accounts.dev/.well-known/jwks.json
+CLERK_SECRET_KEY=sk_test_xxx
 
-aws s3vectors create-vector-bucket --vector-bucket-name livepaper-vectors
-aws s3vectors create-index --vector-bucket-name livepaper-vectors --index-name papers --data-type float32 --dimension 384 --distance-metric cosine
-Once your infrastructure is live, update the GitHub secrets and then I can safely destroy my setup.
+# SendGrid
+SENDGRID_API_KEY=SG.xxxxxxxxxx
+EMAIL_FROM=you@yourdomain.com
+EMAIL_FROM_NAME=LivePaper
+APP_BASE_URL=http://localhost:3000
+
+# LangFuse (optional — leave blank to disable)
+LANGFUSE_SECRET_KEY=
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_HOST=https://cloud.langfuse.com
+
+# Agent tuning
+CONFIDENCE_THRESHOLD=0.55
+TOP_K_RESULTS=8
+MAX_EXPERT_EMAILS_PER_QUERY=3
+```
+
+Run the backend:
+
+```bash
+cargo run
+```
+
+The server starts on `http://localhost:8080`. Database tables are created automatically on first run.
+
+---
+
+### 3. Frontend setup
+
+```bash
+cd ../frontend
+npm install
+cp .env.example .env.local
+```
+
+Fill in your `.env.local`:
+
+```dotenv
+NEXT_PUBLIC_API_URL=http://localhost:8080
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_xxx
+CLERK_SECRET_KEY=sk_test_xxx
+```
+
+Run the frontend:
+
+```bash
+npm run dev
+```
+
+The app is available at `http://localhost:3000`.
+
+---
+
+### 4. Create a Pinecone index
+
+In your [Pinecone console](https://app.pinecone.io):
+1. Create a new index
+2. Set **Dimensions** to `1024` (or `1536` if not using `PINECONE_DIMENSIONS`)
+3. Set **Metric** to `cosine`
+4. Copy the index host URL into `PINECONE_HOST`
+
+---
+
+### 5. Set up Clerk
+
+1. Create an app at [clerk.com](https://clerk.com)
+2. Copy your publishable and secret keys into both `.env` files
+3. Copy the JWKS URL from **API Keys → Advanced** into `CLERK_JWKS_URL`
+4. To make a user an admin, set their `publicMetadata` to `{ "role": "admin" }` via the Clerk dashboard — admin users get access to the paper management dashboard
+
+---
+
+### 6. Add your first paper
+
+Sign in, navigate to the dashboard, and add a paper with its title, abstract, PDF URL, and authors. The ingestion pipeline runs in the background — it downloads the PDF, extracts text, runs LLM enrichment, and stores embeddings in Pinecone and nodes in Neo4j. Then go to the chat and start asking questions.
+
+---
+
+## Deployment
+
+### Backend → Railway
+
+1. Connect your GitHub repo to [Railway](https://railway.app)
+2. Set all backend environment variables in Railway's dashboard
+3. Railway detects the `Dockerfile` and builds automatically
+4. Set the `PORT` variable — Railway injects this automatically
+
+### Frontend → Vercel
+
+1. Import your repo at [vercel.com](https://vercel.com)
+2. Set `NEXT_PUBLIC_API_URL` to your Railway backend URL
+3. Set your Clerk environment variables
+4. Vercel detects Next.js and deploys automatically
+
+---
+
+## Who Is This For?
+
+| User | Use case |
+|---|---|
+| Academic researchers | Query across papers without reading each one fully |
+| PhD students | Navigate literature reviews, surface cross-paper connections |
+| R&D teams | Build internal knowledge bases from proprietary research |
+| Research institutions | Shared knowledge layer across departments |
+| Science journalists | Understand and verify paper claims quickly |
+| Grant writers | Synthesize the state of a field for background sections |
+
+---
+
+## License
+
+MIT

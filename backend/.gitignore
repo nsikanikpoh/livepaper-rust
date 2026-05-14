@@ -1,0 +1,17 @@
+# ── Environment variables ─────────────────────────────────────────────────────
+# Never commit secrets — covers both frontend and backend
+**/.env
+**/.env.*
+!**/.env.example
+
+# ── Backend (Rust) ────────────────────────────────────────────────────────────
+target/
+
+
+# ── OS / editor noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
